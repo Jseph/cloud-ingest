@@ -18,60 +18,23 @@ package agent
 import (
 	"context"
 	"fmt"
-	"math"
-	"sync"
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/GoogleCloudPlatform/cloud-ingest/agent/statslog"
 	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
-	"golang.org/x/time/rate"
 
 	taskpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/task_go_proto"
 	transferpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/transfer_go_proto"
 )
 
-var (
-	// Mutex to protect activeJobRuns and bwLimiter access.
-	mu sync.RWMutex
-	// A map between the active jobruns and the associated BW for each job run.
-	activeJobRuns map[string]int64
-
-	bwLimiter = rate.NewLimiter(rate.Limit(math.MaxInt64), math.MaxInt32)
-)
-
-// UpdateJobRunsBW updates the mapping between job runs and the associated BW.
-func UpdateJobRunsBW(jobrunsBW map[string]int64) {
-	// Currently, we do not have a way to set per job run BW control. The APIs only
-	// allows setting project level BW. For future extensions, DCP distribute the
-	// total project BW over the active job runs. Here we aggregate it again to control
-	// the BW on a project level.
-	var agentBW int64
-	for _, bw := range jobrunsBW {
-		agentBW += bw
-	}
-	mu.Lock()
-	activeJobRuns = jobrunsBW
-	if diff := math.Abs(float64(agentBW) - float64(bwLimiter.Limit())); diff > 0.0000001 {
-		glog.Infof("Updating the BW limits, old: %.fMB/s, new: %.fMB/s.", bwLimiter.Limit()/1000000.0, rate.Limit(agentBW/1000000))
-		burst := math.MaxInt32
-		if agentBW < int64(burst) {
-			burst = int(agentBW)
-		}
-		bwLimiter = rate.NewLimiter(rate.Limit(agentBW), burst)
-	}
-	mu.Unlock()
-}
-
 // WorkHandler is an interface to handle different task types.
 type WorkHandler interface {
 	// Do handles the TaskReqMsg and returns a TaskRespMsg.
 	Do(ctx context.Context, taskReqMsg *taskpb.TaskReqMsg) *taskpb.TaskRespMsg
-
-	// Type returns a string of the Handler's type.
-	Type() string
 }
 
 // WorkProcessor processes tasks of a certain type. It listens to subscription
@@ -81,8 +44,8 @@ type WorkProcessor struct {
 	WorkSub       *pubsub.Subscription
 	ProgressTopic *pubsub.Topic
 	Handlers      *HandlerRegistry
-	StatsLog      *statslog.StatsLog
 	JcpClient     *jcp.Client
+	StatsTracker  *stats.Tracker
 }
 
 func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message) {
@@ -104,7 +67,6 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 		}
 		useJcp = true
 	}
-	var isActiveJob bool
 	var jcpWg sync.WaitGroup
 	quitHeartbeat := make(chan bool)
 	if useJcp {
@@ -129,7 +91,6 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 			return
 		}
 		taskSpec.LeaseTokenId = resp.LeaseTokenId
-		isActiveJob = true
 		// Set up a periodic heartbeat to not lose the lease.
 		jcpWg.Add(1)
 		go func() {
@@ -157,21 +118,18 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 				}
 			}
 		}()
-		isActiveJob = true
-	} else {
-		mu.RLock()
-		isActiveJob = activeJobRuns[taskReqMsg.JobrunRelRsrcName] != 0
-		mu.RUnlock()
 	}
 	var taskRespMsg *taskpb.TaskRespMsg
-	if isActiveJob {
-		start := time.Now()
+	if useJcp || rate.IsJobRunActive(taskReqMsg.JobrunRelRsrcName) {
 		handler, agentErr := wp.Handlers.HandlerForTaskReqMsg(&taskReqMsg)
 		if agentErr != nil {
 			taskRespMsg = buildTaskRespMsg(&taskReqMsg, nil, nil, *agentErr)
 		} else {
+			start := time.Now()
 			taskRespMsg = handler.Do(ctx, &taskReqMsg)
-			wp.StatsLog.AddSample(handler.Type(), time.Now().Sub(start))
+			if wp.StatsTracker != nil {
+				wp.StatsTracker.RecordTaskRespDuration(taskRespMsg, time.Now().Sub(start))
+			}
 		}
 	} else {
 		taskRespMsg = buildTaskRespMsg(&taskReqMsg, nil, nil, AgentError{

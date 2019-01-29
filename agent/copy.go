@@ -36,6 +36,8 @@ import (
 
 	"cloud.google.com/go/storage"
 
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/GoogleCloudPlatform/cloud-ingest/gcloud"
 	"github.com/GoogleCloudPlatform/cloud-ingest/helpers"
 	"github.com/golang/protobuf/proto"
@@ -53,10 +55,15 @@ import (
 )
 
 const (
-	defaultCopyMemoryLimit int64  = 1 << 30 // Default memory limit is 1 GB.
+	defaultCopyMemoryLimit int64  = 1 << 30 // Default memory limit is 1 GiB.
 	userAgent                     = "google-cloud-ingest-on-premises-agent"
 	userAgentInternal             = "google-cloud-ingest-on-premises-agent"
 	MTIME_ATTR_NAME        string = "goog-reserved-file-mtime"
+
+	// Note: this default chunk size is only used if the DCP instructs the
+	// Agent to copy the entire file but does not specify a chunk size. This
+	// happens by sending a BytesToCopy value <= 0 in the CopyTaskSpec.
+	veneerClientDefaultChunkSize = 1 << 27 // 128MiB.
 )
 
 var (
@@ -94,28 +101,28 @@ func NewResumableHttpClient(ctx context.Context, opts ...option.ClientOption) (*
 
 // CopyHandler is responsible for handling copy tasks.
 type CopyHandler struct {
-	gcs                gcloud.GCS
-	resumableChunkSize int
-	hc                 *http.Client
-	memoryLimiter      *semaphore.Weighted
+	gcs           gcloud.GCS
+	hc            *http.Client
+	memoryLimiter *semaphore.Weighted
 	// concurrentCopySem is semaphore to limit the number of concurrent goroutines uploading files.
 	concurrentCopySem *semaphore.Weighted
+
+	statsTracker *stats.Tracker // For tracking bytes sent/copied.
 
 	// Exposed here only for testing purposes.
 	httpDoFunc func(context.Context, *http.Client, *http.Request) (*http.Response, error)
 }
 
-// NewCopyHandler creates a CopyHandler with storage.Client and http.Client. The
-// resumableChunkSize is the chunk size used for resumable uploads. The maxParallelism
-// is the max number of goroutines copying files concurrently.
-func NewCopyHandler(storageClient *storage.Client, maxParallelism int, resumableChunkSize int, hc *http.Client) *CopyHandler {
+// NewCopyHandler creates a CopyHandler with storage.Client and http.Client.
+// The maxParallelism is the max number of goroutines copying files concurrently.
+func NewCopyHandler(storageClient *storage.Client, maxParallelism int, hc *http.Client, st *stats.Tracker) *CopyHandler {
 	return &CopyHandler{
-		gcs:                gcloud.NewGCSClient(storageClient),
-		resumableChunkSize: resumableChunkSize,
-		hc:                 hc,
-		memoryLimiter:      semaphore.NewWeighted(copyMemoryLimit),
-		concurrentCopySem:  semaphore.NewWeighted(int64(maxParallelism)),
-		httpDoFunc:         ctxhttp.Do,
+		gcs:               gcloud.NewGCSClient(storageClient),
+		hc:                hc,
+		memoryLimiter:     semaphore.NewWeighted(copyMemoryLimit),
+		concurrentCopySem: semaphore.NewWeighted(int64(maxParallelism)),
+		httpDoFunc:        ctxhttp.Do,
+		statsTracker:      st,
 	}
 }
 
@@ -153,10 +160,6 @@ func checkFileStats(beforeStats os.FileInfo, f *os.File) error {
 		}
 	}
 	return nil
-}
-
-func (h *CopyHandler) Type() string {
-	return "copy"
 }
 
 func (h *CopyHandler) handleCopySpec(ctx context.Context, copySpec *taskpb.CopySpec) (*taskpb.CopyLog, error) {
@@ -301,10 +304,10 @@ func (h *CopyHandler) copyEntireFile(ctx context.Context, c *taskpb.CopySpec, sr
 		t.Metadata = map[string]string{
 			MTIME_ATTR_NAME: strconv.FormatInt(stats.ModTime().Unix(), 10),
 		}
-		if bufSize > int64(h.resumableChunkSize) {
-			bufSize = int64(h.resumableChunkSize)
-			t.ChunkSize = h.resumableChunkSize
+		if c.BytesToCopy <= 0 {
+			bufSize = veneerClientDefaultChunkSize
 		}
+		t.ChunkSize = int(bufSize)
 	}
 
 	// Create a buffer that respects the Agent's copyMemoryLimit.
@@ -322,10 +325,16 @@ func (h *CopyHandler) copyEntireFile(ctx context.Context, c *taskpb.CopySpec, sr
 	defer h.memoryLimiter.Release(bufSize)
 	buf := make([]byte, bufSize)
 
+	// Wrap the srcFile with rate limiting and byte tracking readers.
+	r := rate.NewRateLimitingReader(srcFile)
+	if h.statsTracker != nil {
+		r = h.statsTracker.NewByteTrackingReader(r)
+	}
+
 	// Perform the copy (by writing to the gcsWriter).
 	var srcCRC32C uint32
 	for {
-		n, err := srcFile.Read(buf)
+		n, err := r.Read(buf)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -333,14 +342,6 @@ func (h *CopyHandler) copyEntireFile(ctx context.Context, c *taskpb.CopySpec, sr
 			w.CloseWithError(err)
 			return err
 		}
-		mu.RLock()
-		// TODO(b/119415296): Avoid locking the global mutex while we are waiting
-		// for tokens from the limiter.
-		if err := bwLimiter.WaitN(ctx, n); err != nil {
-			mu.RUnlock()
-			return err
-		}
-		mu.RUnlock()
 		_, err = w.Write(buf[:n])
 		if err != nil {
 			w.CloseWithError(err)
@@ -503,14 +504,16 @@ func (h *CopyHandler) copyResumableChunk(ctx context.Context, c *taskpb.CopySpec
 		// to re-read from the srcFile (potentially hitting an on-premises NFS).
 		copyBuf := make([]byte, len(buf))
 		copy(copyBuf, buf)
+		cbr := bytes.NewReader(copyBuf)
 
-		// Add bandwidth control to the HTTP request body.
-		mu.RLock()
-		rlr := NewRateLimitedReader(ctx, bytes.NewReader(copyBuf), bwLimiter)
-		mu.RUnlock()
+		// Wrap the chunk buffer with rate limiting and byte tracking readers.
+		r := rate.NewRateLimitingReader(cbr)
+		if h.statsTracker != nil {
+			r = h.statsTracker.NewByteTrackingReader(r)
+		}
 
 		// Perform the copy!
-		resp, err = h.resumedCopyRequest(ctx, c.ResumableUploadId, rlr, c.BytesCopied, int64(bytesRead), final)
+		resp, err = h.resumedCopyRequest(ctx, c.ResumableUploadId, r, c.BytesCopied, int64(bytesRead), final)
 
 		var status int
 		if resp != nil {

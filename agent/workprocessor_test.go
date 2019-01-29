@@ -7,12 +7,14 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/pubsub/pstest"
-	"github.com/GoogleCloudPlatform/cloud-ingest/agent/statslog"
 	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 
+	controlpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/control_go_proto"
 	taskpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/task_go_proto"
 )
 
@@ -23,17 +25,6 @@ type TestWorkHandler struct {
 // Do handles the TaskReqMsg and returns a TaskRespMsg.
 func (h *TestWorkHandler) Do(_ context.Context, taskReqMsg *taskpb.TaskReqMsg) *taskpb.TaskRespMsg {
 	return h.responses[taskReqMsg.TaskRelRsrcName]
-}
-
-// Type returns a string of the Handler's type.
-func (h *TestWorkHandler) Type() string {
-	return "test handler"
-}
-
-func init() {
-	mu.Lock()
-	activeJobRuns = make(map[string]int64)
-	mu.Unlock()
 }
 
 // fakePubSubClient returns a fake pubsub client and a clean up function that should be called
@@ -118,9 +109,15 @@ func TestWorkProcessorProcessMessage(t *testing.T) {
 		JobRunVersion:     "0.0.0",
 	}
 
-	mu.Lock()
-	activeJobRuns[taskReqMsg.JobrunRelRsrcName] = 1
-	mu.Unlock()
+	cm := &controlpb.Control{
+		JobRunsBandwidths: []*controlpb.JobRunBandwidth{
+			&controlpb.JobRunBandwidth{
+				JobrunRelRsrcName: taskReqMsg.JobrunRelRsrcName,
+				Bandwidth:         1,
+			},
+		},
+	}
+	rate.ProcessCtrlMsg(cm, nil)
 
 	data, err := proto.Marshal(taskReqMsg)
 	if err != nil {
@@ -141,12 +138,12 @@ func TestWorkProcessorProcessMessage(t *testing.T) {
 	wp := WorkProcessor{
 		WorkSub:       workSub,
 		ProgressTopic: progressTopic,
-		Handlers: NewHandlerRegistry(map[uint64]WorkHandler{
+		Handlers: &HandlerRegistry{map[uint64]WorkHandler{
 			0: &TestWorkHandler{map[string]*taskpb.TaskRespMsg{
 				taskReqMsg.TaskRelRsrcName: want,
 			}},
-		}),
-		StatsLog: statslog.New(),
+		}},
+		StatsTracker: stats.NewTracker(ctx),
 	}
 	wp.processMessage(ctx, psTaskReqMsg)
 
@@ -197,7 +194,7 @@ func TestWorkProcessorProcessMessageNotActiveJob(t *testing.T) {
 		WorkSub:       workSub,
 		ProgressTopic: progressTopic,
 		Handlers:      nil,
-		StatsLog:      statslog.New(),
+		StatsTracker:  stats.NewTracker(ctx),
 	}
 	wp.processMessage(ctx, psTaskReqMsg)
 
@@ -307,9 +304,15 @@ func TestWorkProcessorProcessMessageNoHandler(t *testing.T) {
 		JobRunVersion:     "1.0.0",
 	}
 
-	mu.Lock()
-	activeJobRuns[taskReqMsg.JobrunRelRsrcName] = 1
-	mu.Unlock()
+	cm := &controlpb.Control{
+		JobRunsBandwidths: []*controlpb.JobRunBandwidth{
+			&controlpb.JobRunBandwidth{
+				JobrunRelRsrcName: taskReqMsg.JobrunRelRsrcName,
+				Bandwidth:         1,
+			},
+		},
+	}
+	rate.ProcessCtrlMsg(cm, nil)
 
 	data, err := proto.Marshal(taskReqMsg)
 	if err != nil {
@@ -331,12 +334,12 @@ func TestWorkProcessorProcessMessageNoHandler(t *testing.T) {
 	wp := WorkProcessor{
 		WorkSub:       workSub,
 		ProgressTopic: progressTopic,
-		Handlers: NewHandlerRegistry(map[uint64]WorkHandler{
+		Handlers: &HandlerRegistry{map[uint64]WorkHandler{
 			0: &TestWorkHandler{map[string]*taskpb.TaskRespMsg{
 				taskReqMsg.TaskRelRsrcName: want,
 			}},
-		}),
-		StatsLog: statslog.New(),
+		}},
+		StatsTracker: stats.NewTracker(ctx),
 	}
 	wp.processMessage(ctx, psTaskReqMsg)
 

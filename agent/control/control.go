@@ -13,13 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package agent
+package control
 
 import (
 	"context"
 	"time"
 
 	"cloud.google.com/go/pubsub"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 
@@ -28,13 +30,21 @@ import (
 
 // ControlHandler is responsible for receiving control messages pushed by the backend service.
 type ControlHandler struct {
-	sub        *pubsub.Subscription
-	lastUpdate time.Time
+	sub          *pubsub.Subscription
+	lastUpdate   time.Time
+	statsTracker *stats.Tracker
+
+	processCtrlMsg func(cm *controlpb.Control, st *stats.Tracker) // Test hook.
 }
 
 // NewControlHandler creates an instance of ControlHandler.
-func NewControlHandler(sub *pubsub.Subscription) *ControlHandler {
-	return &ControlHandler{sub, time.Now()}
+func NewControlHandler(s *pubsub.Subscription, st *stats.Tracker) *ControlHandler {
+	return &ControlHandler{
+		sub:            s,
+		lastUpdate:     time.Now(),
+		statsTracker:   st,
+		processCtrlMsg: rate.ProcessCtrlMsg,
+	}
 }
 
 // HandleControlMessages starts handling control messages sent by the service. This
@@ -47,7 +57,7 @@ func (ch *ControlHandler) HandleControlMessages(ctx context.Context) error {
 	return ch.sub.Receive(ctx, ch.processMessage)
 }
 
-func (ch *ControlHandler) processMessage(ctx context.Context, msg *pubsub.Message) {
+func (ch *ControlHandler) processMessage(_ context.Context, msg *pubsub.Message) {
 	if ch.sub != nil {
 		defer msg.Ack()
 	}
@@ -61,14 +71,14 @@ func (ch *ControlHandler) processMessage(ctx context.Context, msg *pubsub.Messag
 
 	if msg.PublishTime.Before(ch.lastUpdate) {
 		// Ignore stale messages.
-		glog.Errorf("Ignore stale message: %v, publish time: %v", controlMsg, msg.PublishTime)
+		glog.Infof("Ignore stale message: %v, publish time: %v", controlMsg, msg.PublishTime)
 		return
 	}
 
-	jobrunsBW := make(map[string]int64)
-	for _, jobBW := range controlMsg.JobRunsBandwidths {
-		jobrunsBW[jobBW.JobrunRelRsrcName] = jobBW.Bandwidth
-	}
-	UpdateJobRunsBW(jobrunsBW)
+	ch.processCtrlMsg(&controlMsg, ch.statsTracker)
+
 	ch.lastUpdate = msg.PublishTime
+	if ch.statsTracker != nil {
+		ch.statsTracker.RecordCtrlMsg(msg.PublishTime)
+	}
 }

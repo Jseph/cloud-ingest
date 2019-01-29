@@ -28,7 +28,8 @@ import (
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent"
-	"github.com/GoogleCloudPlatform/cloud-ingest/agent/statslog"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/control"
+	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/versions"
 	"github.com/GoogleCloudPlatform/cloud-ingest/gcloud"
 	"github.com/golang/glog"
@@ -57,7 +58,6 @@ var (
 	numberConcurrentListTasks int
 	maxPubSubLeaseExtenstion  time.Duration
 	credsFile                 string
-	copyTaskChunkSize         int
 	listTaskChunkSize         int
 
 	pubsubPrefix string
@@ -66,9 +66,7 @@ var (
 	skipProcessCopyTasks bool
 	printVersion         bool
 
-	pulseFrequency int
-
-	enableStatsLog bool
+	enableStatsTracker bool
 
 	listFileSizeThreshold          int
 	maxMemoryForListingDirectories int
@@ -85,8 +83,6 @@ func init() {
 		"The Pub/Sub topics and subscriptions project id. Must be set!")
 	flag.StringVar(&credsFile, "creds-file", "",
 		"The service account JSON key file. Use the default credentials if empty.")
-	flag.IntVar(&copyTaskChunkSize, "copy-task-chunk-size", 1<<25,
-		"The resumable upload chunk size used for copy tasks, defaults to 32MB.")
 	flag.IntVar(&listTaskChunkSize, "list-task-chunk-size", 8*1024*1024,
 		"The resumable upload chunk size used for list tasks, defaults to 8MiB.")
 	flag.IntVar(&numberThreads, "threads", 100,
@@ -110,9 +106,7 @@ func init() {
 	flag.StringVar(&pubsubPrefix, "pubsub-prefix", "",
 		"Prefix of Pub/Sub topics and subscriptions names.")
 
-	flag.IntVar(&pulseFrequency, "pulse-frequency", 10, "the number of seconds the agent will wait before sending a pulse")
-
-	flag.BoolVar(&enableStatsLog, "enable-stats-log", true, "Enable stats logging to INFO logs.")
+	flag.BoolVar(&enableStatsTracker, "enable-stats-log", true, "Enable stats logging to INFO logs.")
 
 	flag.IntVar(&listFileSizeThreshold, "list-file-size-threshold", 10000,
 		"List tasks will keep listing directories until the number of listed files and directories exceeds this threshold, or until there are no more files/directories to list")
@@ -217,13 +211,13 @@ func waitOnTopic(ctx context.Context, topic gcloud.PSTopic) error {
 }
 
 func subscribeToControlTopic(ctx context.Context, client *pubsub.Client, topic *pubsub.Topic) (*pubsub.Subscription, error) {
-	hostname, err := agent.GetHostName()
+	hostname, err := os.Hostname()
 	if err != nil {
 		return nil, err
 	}
 	h := fnv.New64a()
 	h.Write([]byte(hostname))
-	h.Write([]byte(agent.GetProcessId()))
+	h.Write([]byte(fmt.Sprintf("%v", os.Getpid())))
 
 	subID := fmt.Sprintf("%s%s-%d", pubsubPrefix, controlSubscription, h.Sum64())
 	sub := client.Subscription(subID)
@@ -288,24 +282,19 @@ func main() {
 	go func() {
 		defer wg.Done()
 		pulseTopicWrapper := gcloud.NewPubSubTopicWrapper(pubSubClient.Topic(pubsubPrefix + pulseTopic))
-
 		// Wait for pulse topic to exist.
 		if err := waitOnTopic(ctx, pulseTopicWrapper); err != nil {
 			glog.Fatalf("Could not get PulseTopic: %s \n error: %v ", pulseTopicWrapper.ID(), err)
 		}
-
-		ph, err := agent.NewPulseHandler(pulseTopicWrapper, int32(pulseFrequency), logDir)
+		_, err := control.NewPulseSender(ctx, pulseTopicWrapper, logDir)
 		if err != nil {
-			glog.Fatalf("Could not create a PulseHandler with Topic: %v and Frequency: %v \n error: %v ", pulseTopicWrapper.ID(), pulseFrequency, err)
+			glog.Fatalf("NewPulseSender(%v, %v) got err: %v ", pulseTopicWrapper, logDir, err)
 		}
-
-		ph.Run(ctx)
 	}()
 
-	var sl *statslog.StatsLog
-	if enableStatsLog {
-		sl = statslog.New()
-		go sl.PeriodicallyLogStats(ctx)
+	var st *stats.Tracker
+	if enableStatsTracker {
+		st = stats.NewTracker(ctx)
 	}
 
 	var listProcessor, copyProcessor agent.WorkProcessor
@@ -331,13 +320,20 @@ func main() {
 				glog.Fatalf("Could not find list topic %s, error %+v", listTopicWrapper.ID(), err)
 			}
 
+			// Convert maxMemoryForListingDirectories to bytes and divide it equally between
+			// the list task processing threads.
+			allowedDirBytes := maxMemoryForListingDirectories * 1024 * 1024 / numberConcurrentListTasks
+
+			depthFirstListHandler := agent.NewDepthFirstListHandler(storageClient, listTaskChunkSize, listFileSizeThreshold, allowedDirBytes)
 			listProcessor = agent.WorkProcessor{
 				WorkSub:       listSub,
 				ProgressTopic: listTopic,
 				Handlers: agent.NewHandlerRegistry(map[uint64]agent.WorkHandler{
 					0: agent.NewListHandler(storageClient, listTaskChunkSize),
+					1: depthFirstListHandler,
+					2: depthFirstListHandler,
 				}),
-				StatsLog: sl,
+				StatsTracker: st,
 			}
 
 			listProcessor.Process(ctx)
@@ -365,14 +361,16 @@ func main() {
 				glog.Fatalf("Could not find copy topic %s, error %+v", copyTopicWrapper.ID(), err)
 			}
 
-			copyHandler := agent.NewCopyHandler(storageClient, numberThreads, copyTaskChunkSize, httpc)
+			copyHandler := agent.NewCopyHandler(storageClient, numberThreads, httpc, st)
 			copyProcessor = agent.WorkProcessor{
 				WorkSub:       copySub,
 				ProgressTopic: copyTopic,
 				Handlers: agent.NewHandlerRegistry(map[uint64]agent.WorkHandler{
 					0: copyHandler,
+					1: copyHandler,
+					2: copyHandler,
 				}),
-				StatsLog: sl,
+				StatsTracker: st,
 			}
 
 			copyProcessor.Process(ctx)
@@ -395,7 +393,7 @@ func main() {
 			glog.Fatalf("Could not create subscription to control topic %v, with err: %v", controlTopic, err)
 		}
 
-		ch := agent.NewControlHandler(controlSub)
+		ch := control.NewControlHandler(controlSub, st)
 		if err := ch.HandleControlMessages(ctx); err != nil {
 			glog.Fatalf("Failed handling control messages with err: %v.", err)
 		}
