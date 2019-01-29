@@ -18,7 +18,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
+const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
 // Specifies the task operation that a task performs.
 type Type int32
@@ -250,116 +250,14 @@ func (m *Spec) GetCopyBundleSpec() *CopyBundleSpec {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Spec) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Spec_OneofMarshaler, _Spec_OneofUnmarshaler, _Spec_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Spec) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*Spec_ListSpec)(nil),
 		(*Spec_ProcessListSpec)(nil),
 		(*Spec_CopySpec)(nil),
 		(*Spec_CopyBundleSpec)(nil),
 	}
-}
-
-func _Spec_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Spec)
-	// spec
-	switch x := m.Spec.(type) {
-	case *Spec_ListSpec:
-		b.EncodeVarint(1<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.ListSpec); err != nil {
-			return err
-		}
-	case *Spec_ProcessListSpec:
-		b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.ProcessListSpec); err != nil {
-			return err
-		}
-	case *Spec_CopySpec:
-		b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.CopySpec); err != nil {
-			return err
-		}
-	case *Spec_CopyBundleSpec:
-		b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.CopyBundleSpec); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Spec.Spec has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _Spec_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Spec)
-	switch tag {
-	case 1: // spec.list_spec
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(ListSpec)
-		err := b.DecodeMessage(msg)
-		m.Spec = &Spec_ListSpec{msg}
-		return true, err
-	case 2: // spec.process_list_spec
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(ProcessListSpec)
-		err := b.DecodeMessage(msg)
-		m.Spec = &Spec_ProcessListSpec{msg}
-		return true, err
-	case 3: // spec.copy_spec
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(CopySpec)
-		err := b.DecodeMessage(msg)
-		m.Spec = &Spec_CopySpec{msg}
-		return true, err
-	case 4: // spec.copy_bundle_spec
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(CopyBundleSpec)
-		err := b.DecodeMessage(msg)
-		m.Spec = &Spec_CopyBundleSpec{msg}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _Spec_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Spec)
-	// spec
-	switch x := m.Spec.(type) {
-	case *Spec_ListSpec:
-		s := proto.Size(x.ListSpec)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Spec_ProcessListSpec:
-		s := proto.Size(x.ProcessListSpec)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Spec_CopySpec:
-		s := proto.Size(x.CopySpec)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Spec_CopyBundleSpec:
-		s := proto.Size(x.CopyBundleSpec)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 // Contains the information about a list task. A list task is responsible for
@@ -1005,116 +903,14 @@ func (m *Log) GetCopyBundleLog() *CopyBundleLog {
 	return nil
 }
 
-// XXX_OneofFuncs is for the internal use of the proto package.
-func (*Log) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
-	return _Log_OneofMarshaler, _Log_OneofUnmarshaler, _Log_OneofSizer, []interface{}{
+// XXX_OneofWrappers is for the internal use of the proto package.
+func (*Log) XXX_OneofWrappers() []interface{} {
+	return []interface{}{
 		(*Log_ListLog)(nil),
 		(*Log_ProcessListLog)(nil),
 		(*Log_CopyLog)(nil),
 		(*Log_CopyBundleLog)(nil),
 	}
-}
-
-func _Log_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
-	m := msg.(*Log)
-	// log
-	switch x := m.Log.(type) {
-	case *Log_ListLog:
-		b.EncodeVarint(1<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.ListLog); err != nil {
-			return err
-		}
-	case *Log_ProcessListLog:
-		b.EncodeVarint(2<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.ProcessListLog); err != nil {
-			return err
-		}
-	case *Log_CopyLog:
-		b.EncodeVarint(3<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.CopyLog); err != nil {
-			return err
-		}
-	case *Log_CopyBundleLog:
-		b.EncodeVarint(4<<3 | proto.WireBytes)
-		if err := b.EncodeMessage(x.CopyBundleLog); err != nil {
-			return err
-		}
-	case nil:
-	default:
-		return fmt.Errorf("Log.Log has unexpected type %T", x)
-	}
-	return nil
-}
-
-func _Log_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
-	m := msg.(*Log)
-	switch tag {
-	case 1: // log.list_log
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(ListLog)
-		err := b.DecodeMessage(msg)
-		m.Log = &Log_ListLog{msg}
-		return true, err
-	case 2: // log.process_list_log
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(ProcessListLog)
-		err := b.DecodeMessage(msg)
-		m.Log = &Log_ProcessListLog{msg}
-		return true, err
-	case 3: // log.copy_log
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(CopyLog)
-		err := b.DecodeMessage(msg)
-		m.Log = &Log_CopyLog{msg}
-		return true, err
-	case 4: // log.copy_bundle_log
-		if wire != proto.WireBytes {
-			return true, proto.ErrInternalBadWireType
-		}
-		msg := new(CopyBundleLog)
-		err := b.DecodeMessage(msg)
-		m.Log = &Log_CopyBundleLog{msg}
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func _Log_OneofSizer(msg proto.Message) (n int) {
-	m := msg.(*Log)
-	// log
-	switch x := m.Log.(type) {
-	case *Log_ListLog:
-		s := proto.Size(x.ListLog)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Log_ProcessListLog:
-		s := proto.Size(x.ProcessListLog)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Log_CopyLog:
-		s := proto.Size(x.CopyLog)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case *Log_CopyBundleLog:
-		s := proto.Size(x.CopyBundleLog)
-		n += 1 // tag and wire
-		n += proto.SizeVarint(uint64(s))
-		n += s
-	case nil:
-	default:
-		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
-	}
-	return n
 }
 
 // Contains log fields for a List task.

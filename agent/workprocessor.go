@@ -24,11 +24,13 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/statslog"
+	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"golang.org/x/time/rate"
 
 	taskpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/task_go_proto"
+	transferpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/transfer_go_proto"
 )
 
 var (
@@ -80,21 +82,87 @@ type WorkProcessor struct {
 	ProgressTopic *pubsub.Topic
 	Handlers      *HandlerRegistry
 	StatsLog      *statslog.StatsLog
+	JcpClient     *jcp.Client
 }
 
 func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message) {
+	// Data will be 1 of 2 forms, either a taskpb.TaskReqMsg or a transferpb.TaskSpec.
+	// transferpb.TaskSpec messages can be converted to taskpb.TaskReqMsgs.
 	var taskReqMsg taskpb.TaskReqMsg
+	var taskSpec transferpb.TaskSpec
+	useJcp := false
 	if err := proto.Unmarshal(msg.Data, &taskReqMsg); err != nil {
-		glog.Errorf("error decoding msg %s with error %v.", string(msg.Data), err)
-		// Non-recoverable error. Will Ack the message to avoid delivering again.
-		msg.Ack()
-		return
+		err = proto.Unmarshal(msg.Data, &taskSpec)
+		if err == nil {
+			err = Unpack(&taskSpec, &taskReqMsg)
+		}
+		if err != nil {
+			glog.Errorf("error decoding msg %s with error %v.", string(msg.Data), err)
+			// Non-recoverable error. Will Ack the message to avoid delivering again.
+			msg.Ack()
+			return
+		}
+		useJcp = true
 	}
+	var isActiveJob bool
+	var jcpWg sync.WaitGroup
+	quitHeartbeat := make(chan bool)
+	if useJcp {
+		msg.Ack()
+		// Perform Checkpoint 0.
+		request := transferpb.ReportTaskProgressRequest{
+			Name:                  taskSpec.Name,
+			ProjectId:             taskSpec.ProjectId,
+			TransferOperationName: taskSpec.TransferOperationName,
+			WorkerId:              "worker_0",
+			LeaseTokenId:          taskSpec.LeaseTokenId,
+			TaskStatus:            transferpb.TaskStatus_IN_PROGRESS,
+		}
 
-	mu.RLock()
-	isActiveJob := activeJobRuns[taskReqMsg.JobrunRelRsrcName] != 0
-	mu.RUnlock()
+		resp, err := wp.JcpClient.ReportTaskProgress(&request)
+		if err != nil {
+			glog.Errorf("error with checkpoint 0 %v", err)
+			return
+		}
+		if resp.EvictTask {
+			glog.Infof("recieved task eviction for %s", taskSpec.Name)
+			return
+		}
+		taskSpec.LeaseTokenId = resp.LeaseTokenId
+		isActiveJob = true
+		// Set up a periodic heartbeat to not lose the lease.
+		jcpWg.Add(1)
+		go func() {
+			for {
+				select {
+				case <-quitHeartbeat:
+					jcpWg.Done()
+					return
+				case <-time.After(5 * time.Second):
+					request := transferpb.ReportTaskProgressRequest{
+						Name:                  taskSpec.Name,
+						ProjectId:             taskSpec.ProjectId,
+						TransferOperationName: taskSpec.TransferOperationName,
+						WorkerId:              "worker_0",
+						LeaseTokenId:          taskSpec.LeaseTokenId,
+						TaskStatus:            transferpb.TaskStatus_IN_PROGRESS,
+					}
 
+					resp, err := wp.JcpClient.ReportTaskProgress(&request)
+					if err != nil {
+						glog.Errorf("error with heartbeat %v", err)
+						return
+					}
+					taskSpec.LeaseTokenId = resp.LeaseTokenId
+				}
+			}
+		}()
+		isActiveJob = true
+	} else {
+		mu.RLock()
+		isActiveJob = activeJobRuns[taskReqMsg.JobrunRelRsrcName] != 0
+		mu.RUnlock()
+	}
 	var taskRespMsg *taskpb.TaskRespMsg
 	if isActiveJob {
 		start := time.Now()
@@ -125,20 +193,47 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 		// The work will remain on PubSub and eventually be taken up by another worker.
 		return
 	}
-	serializedTaskRespMsg, err := proto.Marshal(taskRespMsg)
-	if err != nil {
-		glog.Errorf("Cannot marshal pb %+v with err %v", taskRespMsg, err)
-		// This may be a transient error, will not Ack the messages to retry again
-		// when the message redelivered.
-		return
+	if !useJcp {
+		serializedTaskRespMsg, err := proto.Marshal(taskRespMsg)
+		if err != nil {
+			glog.Errorf("Cannot marshal pb %+v with err %v", taskRespMsg, err)
+			// This may be a transient error, will not Ack the messages to retry again
+			// when the message redelivered.
+			return
+		}
+		pubResult := wp.ProgressTopic.Publish(ctx, &pubsub.Message{Data: serializedTaskRespMsg})
+		if _, err := pubResult.Get(ctx); err != nil {
+			glog.Errorf("Can not publish progress message with err: %v", err)
+			// Don't ack the messages, retry again when the message is redelivered.
+			return
+		}
+		msg.Ack()
+	} else {
+		// Wait for the heartbeat to finish, we don't want to have racing update requests.
+		quitHeartbeat <- true
+		jcpWg.Wait()
+
+		// Convert the taskRespMsg to a ReportTaskProgressRequest.
+		request := NewReportTaskProgressRequest(&taskSpec, taskRespMsg)
+		resp, err := wp.JcpClient.ReportTaskProgress(request)
+		if err != nil {
+			glog.Errorf("Error reporting task progress: %v", err)
+			return
+		}
+		if request.UpdatedTaskSpec != nil {
+			newSpec := request.UpdatedTaskSpec
+			newSpec.LeaseTokenId = resp.LeaseTokenId
+			var newMsg pubsub.Message
+			data, err := proto.Marshal(newSpec)
+			if err != nil {
+				glog.Errorf("Error marshaling new TaskSpec: %v", err)
+				return
+			}
+			newMsg.Data = data
+			wp.processMessage(ctx, &newMsg)
+		}
 	}
-	pubResult := wp.ProgressTopic.Publish(ctx, &pubsub.Message{Data: serializedTaskRespMsg})
-	if _, err := pubResult.Get(ctx); err != nil {
-		glog.Errorf("Can not publish progress message with err: %v", err)
-		// Don't ack the messages, retry again when the message is redelivered.
-		return
-	}
-	msg.Ack()
+
 }
 
 func (wp *WorkProcessor) Process(ctx context.Context) {

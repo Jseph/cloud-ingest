@@ -8,6 +8,7 @@ import (
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/pubsub/pstest"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/statslog"
+	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -219,6 +220,73 @@ func TestWorkProcessorProcessMessageNotActiveJob(t *testing.T) {
 
 	if taskRespMsg.FailureType != taskpb.FailureType_NOT_ACTIVE_JOBRUN {
 		t.Errorf("wp.processMessage(%v) failure type = %v, want %v", taskReqMsg, taskRespMsg.FailureType, taskpb.FailureType_NOT_ACTIVE_JOBRUN)
+	}
+}
+
+func TestWorkProcessorProcessJcpMessage(t *testing.T) {
+
+	ctx := context.Background()
+	client, cleanUp := fakePubSubClient(ctx, t)
+	defer cleanUp()
+
+	progressTopic := createTopic(ctx, t, client, "progress")
+	progressSub := createSubscription(ctx, t, client, progressTopic, "progressSub")
+
+	workTopic := createTopic(ctx, t, client, "work")
+	workSub := createSubscription(ctx, t, client, workTopic, "workSub")
+
+	taskReqMsg := &taskpb.TaskReqMsg{
+		TaskRelRsrcName:   "taskid",
+		JobrunRelRsrcName: "jobrunid",
+		JobRunVersion:     "0.0.0",
+	}
+
+	mu.Lock()
+	activeJobRuns[taskReqMsg.JobrunRelRsrcName] = 1
+	mu.Unlock()
+
+	data, err := proto.Marshal(taskReqMsg)
+	if err != nil {
+		t.Fatalf("error marshalling task req message %v", err)
+	}
+
+	// Publish and receive task request message
+	res := workTopic.Publish(ctx, &pubsub.Message{Data: data})
+	res.Get(ctx)
+	msgs := make(chan *pubsub.Message)
+	receiveMessages(ctx, msgs, workSub)
+	psTaskReqMsg := getMessageOrTimeout(t, msgs)
+
+	want := &taskpb.TaskRespMsg{
+		TaskRelRsrcName: taskReqMsg.TaskRelRsrcName,
+		Status:          "SUCCESS",
+	}
+	fakeJcp := jcp.NewFakeServer()
+	defer fakeJcp.Close()
+	wp := WorkProcessor{
+		WorkSub:       workSub,
+		ProgressTopic: progressTopic,
+		Handlers: NewHandlerRegistry(map[uint64]WorkHandler{
+			0: &TestWorkHandler{map[string]*taskpb.TaskRespMsg{
+				taskReqMsg.TaskRelRsrcName: want,
+			}},
+		}),
+		StatsLog: statslog.New(),
+		JcpClient: jcp.NewClient(jcp.NewServerConnection(fakeJcp)),
+	}
+	wp.processMessage(ctx, psTaskReqMsg)
+
+	// Read and check task response message
+	receiveMessages(ctx, msgs, progressSub)
+	psTaskRespMsg := getMessageOrTimeout(t, msgs)
+
+	var taskRespMsg taskpb.TaskRespMsg
+	if err := proto.Unmarshal(psTaskRespMsg.Data, &taskRespMsg); err != nil {
+		t.Fatalf("error decoding msg %s with error %v.", string(psTaskRespMsg.Data), err)
+	}
+
+	if taskRespMsg.TaskRelRsrcName != want.TaskRelRsrcName || taskRespMsg.Status != want.Status {
+		t.Errorf("wp.processMessage(%v) = %v, want %v", taskReqMsg, taskRespMsg, want)
 	}
 }
 
