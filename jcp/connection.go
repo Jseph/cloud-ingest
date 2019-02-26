@@ -37,6 +37,6 @@ func NewFakeConnection() (*grpc.ClientConn, error) {
 func NewServerConnection(server *Server) (*grpc.ClientConn, error) {
 	return grpc.Dial(
 		server.Addr,
-		grpc.withInsecure(),
+		grpc.WithInsecure(),
 	)
 }

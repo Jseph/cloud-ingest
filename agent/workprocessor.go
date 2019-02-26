@@ -18,6 +18,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/pubsub"
@@ -53,19 +54,19 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 	// transferpb.TaskSpec messages can be converted to taskpb.TaskReqMsgs.
 	var taskReqMsg taskpb.TaskReqMsg
 	var taskSpec transferpb.TaskSpec
-	useJcp := false
-	if err := proto.Unmarshal(msg.Data, &taskReqMsg); err != nil {
-		err = proto.Unmarshal(msg.Data, &taskSpec)
-		if err == nil {
-			err = Unpack(&taskSpec, &taskReqMsg)
-		}
-		if err != nil {
-			glog.Errorf("error decoding msg %s with error %v.", string(msg.Data), err)
-			// Non-recoverable error. Will Ack the message to avoid delivering again.
+	useJcp := true
+	err := proto.Unmarshal(msg.Data, &taskSpec)
+	if err == nil {
+		err = Unpack(&taskSpec, &taskReqMsg)
+	}
+	if err != nil {
+		glog.Info("Could not parse message as jcp message.  Using old message format")
+		if err = proto.Unmarshal(msg.Data, &taskReqMsg); err != nil {
+			glog.Errorf("could not decode pubsub message.")
 			msg.Ack()
 			return
 		}
-		useJcp = true
+		useJcp = false
 	}
 	var jcpWg sync.WaitGroup
 	quitHeartbeat := make(chan bool)

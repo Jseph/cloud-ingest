@@ -88,6 +88,29 @@ func createLogEntries(taskSpec *transferpb.TaskSpec, log *taskpb.Log) []transfer
 	}
 }
 
+func newProcessListTask(jobRun string, respMsg *taskpb.TaskRespMsg) *transferpb.TaskSpec {
+	listSpec := respMsg.ReqSpec.GetListSpec()
+	processListSpec := taskpb.ProcessListSpec{
+		DstListResultBucket: listSpec.DstListResultBucket,
+		DstListResultObject: listSpec.DstListResultObject,
+		SrcDirectory: listSpec.SrcDirectories[0],
+	}
+	reqMsg := taskpb.TaskReqMsg{
+		TaskRelRsrcName: respMsg.TaskRelRsrcName,
+		JobrunRelRsrcName: jobRun,
+		JobRunVersion: respMsg.JobRunVersion,
+		Spec: &taskpb.Spec{
+			Spec: &taskpb.Spec_ProcessListSpec{
+				ProcessListSpec: &processListSpec,
+			},
+		},
+	}
+	var taskSpec transferpb.TaskSpec
+	Pack(&reqMsg, &taskSpec)
+	taskSpec.TaskType = "PROCESS_LIST"
+	return &taskSpec
+}
+
 func NewReportTaskProgressRequest(taskSpec *transferpb.TaskSpec, taskRespMsg *taskpb.TaskRespMsg) *transferpb.ReportTaskProgressRequest {
 	req := &transferpb.ReportTaskProgressRequest{
 		Name:                  taskSpec.Name,
@@ -125,15 +148,21 @@ func NewReportTaskProgressRequest(taskSpec *transferpb.TaskSpec, taskRespMsg *ta
 			}}
 	} else {
 		//TODO: add counter support here.
-		spec := taskRespMsg.RespSpec.Spec
+		spec := taskRespMsg.ReqSpec.Spec
+		if taskRespMsg.RespSpec != nil {
+			spec = taskRespMsg.RespSpec.Spec
+		}
 		switch spec.(type) {
 		case *taskpb.Spec_ListSpec:
 			req.TaskStatus = transferpb.TaskStatus_COMPLETED
-			//TODO: Add in the new list processing task spec.
+			req.GeneratedTaskSpecs = []*transferpb.TaskSpec{
+				newProcessListTask(taskSpec.TransferOperationName, taskRespMsg),
+			}
 		case *taskpb.Spec_CopySpec:
-			var copySpec *taskpb.CopySpec
-			copySpec = spec.(*taskpb.Spec_CopySpec).CopySpec
+			copySpec := taskRespMsg.RespSpec.GetCopySpec()
 			if copySpec.FileBytes == copySpec.BytesCopied {
+				glog.Errorf("marking job COMPLETED %v = %v", copySpec.FileBytes,
+					copySpec.BytesCopied)
 				req.TaskStatus = transferpb.TaskStatus_COMPLETED
 			} else {
 				req.TaskStatus = transferpb.TaskStatus_IN_PROGRESS

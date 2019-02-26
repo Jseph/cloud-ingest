@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	transferpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/transfer_go_proto"
 )
@@ -28,7 +29,12 @@ type Server struct {
 	TServer TServer
 }
 
-// Unerlying service implementer.
+type Task struct {
+	Spec *transferpb.TaskSpec
+	Status transferpb.TaskStatus
+}
+
+// Underlying service implementer.
 type TServer struct {
 	transferpb.StorageTransferServiceServer
 
@@ -59,7 +65,7 @@ func NewFakeServer() *Server {
 		l: l,
 		Gsrv: grpc.NewServer(),
 		TServer: TServer{
-			tasks: map[string]*transferpb.TaskSpec{},
+			tasks: map[string]*Task{},
 		},
 	}
 	transferpb.RegisterStorageTransferServiceServer(s.Gsrv, &s.TServer)
@@ -77,10 +83,13 @@ func (s *Server) Close() {
 	s.l.Close()
 }
 
-func (s *Server) InsertTask(task transferpb.TaskSpec) {
+func (s *Server) InsertTask(spec transferpb.TaskSpec) {
 	s.TServer.mu.Lock()
 	defer s.TServer.mu.Unlock()
-	s.TServer.tasks[task.Name] = &task
+	s.TServer.tasks[spec.Name] = &Task{
+		Spec: &spec,
+		Status: transferpb.TaskStatus_IN_PROGRESS,
+	}
 }
 
 func (s *Server) SendAllTasks(t *pubsub.Topic) error {
@@ -88,14 +97,20 @@ func (s *Server) SendAllTasks(t *pubsub.Topic) error {
 	defer s.TServer.mu.Unlock()
 	ctx := context.Background()
 	for _, task := range s.TServer.tasks {
-		data, err := proto.Marshal(task)
+		data, err := proto.Marshal(task.Spec)
 		if err != nil {
 			return err
 		}
-		t.Publish(ctx, &pubsub.Message{Data: data})
-		t.Get(ctx)
+		res := t.Publish(ctx, &pubsub.Message{Data: data})
+		res.Get(ctx)
 	}
 	return nil
+}
+
+func (s *Server) GetTask(name string) *Task {
+	s.TServer.mu.Lock()
+	defer s.TServer.mu.Unlock()
+	return s.TServer.tasks[name]
 }
 
 func (s *TServer) ReportTaskProgress(_ context.Context, r *transferpb.ReportTaskProgressRequest) (*transferpb.ReportTaskProgressResponse, error) {
@@ -106,7 +121,8 @@ func (s *TServer) ReportTaskProgress(_ context.Context, r *transferpb.ReportTask
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "Task %v not in database", r.Name)
 	}
-	if task.LeaseTokenId != r.LeaseTokenId {
+	spec := task.Spec
+	if spec.LeaseTokenId != r.LeaseTokenId {
 		return nil, status.Errorf(codes.FailedPrecondition, "Lease token doesn't match")
 	}
 	if task.Status != transferpb.TaskStatus_IN_PROGRESS {
@@ -114,22 +130,26 @@ func (s *TServer) ReportTaskProgress(_ context.Context, r *transferpb.ReportTask
 		"Cannot report progress for task in state %v.",
 		task.Status.String())
 	}
-	if task.TransferOperationName != r.TransferOperationName {
+	if spec.TransferOperationName != r.TransferOperationName {
 		return nil, status.Errorf(codes.FailedPrecondition,
 		"Transfer operation name doesn't match.")
 	}
 	// Persist changes to the database.
 	if r.UpdatedTaskSpec != nil {
-		s.tasks[r.Name] = r.UpdatedTaskSpec
+		*spec = *r.UpdatedTaskSpec
 	}
+	task.Status = r.TaskStatus
 	for _, spec := range r.GeneratedTaskSpecs {
 		name := strconv.Itoa(rand.Int())
-		s.tasks[name] = proto.Clone(spec).(*transferpb.TaskSpec)
-		s.tasks[name].LeaseTokenId = strconv.Itoa(rand.Int())
-		s.tasks[name].Name = name
+		s.tasks[name] = &Task{
+			Spec: proto.Clone(spec).(*transferpb.TaskSpec),
+			Status: transferpb.TaskStatus_IN_PROGRESS,
+		}
+		s.tasks[name].Spec.LeaseTokenId = strconv.Itoa(rand.Int())
+		s.tasks[name].Spec.Name = name
 	}
 	newLeaseId := strconv.Itoa(rand.Int())
-	task.LeaseTokenId = newLeaseId
+	task.Spec.LeaseTokenId = newLeaseId
 	// Generate the response.
 	response := &transferpb.ReportTaskProgressResponse{
 		LeaseTokenId: newLeaseId,

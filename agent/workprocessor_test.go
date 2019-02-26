@@ -16,6 +16,7 @@ import (
 
 	controlpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/control_go_proto"
 	taskpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/task_go_proto"
+	transferpb "github.com/GoogleCloudPlatform/cloud-ingest/proto/transfer_go_proto"
 )
 
 type TestWorkHandler struct {
@@ -221,69 +222,89 @@ func TestWorkProcessorProcessMessageNotActiveJob(t *testing.T) {
 }
 
 func TestWorkProcessorProcessJcpMessage(t *testing.T) {
-
 	ctx := context.Background()
 	client, cleanUp := fakePubSubClient(ctx, t)
 	defer cleanUp()
 
 	progressTopic := createTopic(ctx, t, client, "progress")
-	progressSub := createSubscription(ctx, t, client, progressTopic, "progressSub")
 
 	workTopic := createTopic(ctx, t, client, "work")
 	workSub := createSubscription(ctx, t, client, workTopic, "workSub")
 
-	taskReqMsg := &taskpb.TaskReqMsg{
-		TaskRelRsrcName:   "taskid",
-		JobrunRelRsrcName: "jobrunid",
+	var spec transferpb.TaskSpec
+	name := "taskid"
+	jobRun := "jobrunid"
+	project := "projectid"
+	rspec := &taskpb.Spec{
+		Spec: &taskpb.Spec_CopySpec{
+			CopySpec: &taskpb.CopySpec {
+				FileBytes: 1,
+				BytesCopied: 1,
+			}}}
+	taskReqMsg := taskpb.TaskReqMsg{
+		TaskRelRsrcName:   name,
+		JobrunRelRsrcName: jobRun,
 		JobRunVersion:     "0.0.0",
+		Spec: rspec,
 	}
-
-	mu.Lock()
-	activeJobRuns[taskReqMsg.JobrunRelRsrcName] = 1
-	mu.Unlock()
-
-	data, err := proto.Marshal(taskReqMsg)
+	err := Pack(&taskReqMsg, &spec)
 	if err != nil {
-		t.Fatalf("error marshalling task req message %v", err)
+		t.Fatalf("error packing task spec %v", err)
 	}
+	spec.Name = name
+	spec.ProjectId = project
+	spec.TransferOperationName = jobRun
+	spec.LeaseTokenId = "initiallease"
+	jcpServer := jcp.NewFakeServer()
+	jcpServer.InsertTask(spec)
+
+	cm := &controlpb.Control{
+		JobRunsBandwidths: []*controlpb.JobRunBandwidth{
+			&controlpb.JobRunBandwidth{
+				JobrunRelRsrcName: jobRun,
+				Bandwidth:         1,
+			},
+		},
+	}
+	rate.ProcessCtrlMsg(cm, nil)
 
 	// Publish and receive task request message
-	res := workTopic.Publish(ctx, &pubsub.Message{Data: data})
-	res.Get(ctx)
+	err = jcpServer.SendAllTasks(workTopic)
+	if err != nil {
+		t.Fatalf("error sending task to worker %v", err)
+	}
 	msgs := make(chan *pubsub.Message)
 	receiveMessages(ctx, msgs, workSub)
 	psTaskReqMsg := getMessageOrTimeout(t, msgs)
 
-	want := &taskpb.TaskRespMsg{
-		TaskRelRsrcName: taskReqMsg.TaskRelRsrcName,
-		Status:          "SUCCESS",
+	conn, err := jcp.NewServerConnection(jcpServer)
+	if err != nil {
+		t.Fatalf("error establishing connection to fake jcp server %v", err)
 	}
-	fakeJcp := jcp.NewFakeServer()
-	defer fakeJcp.Close()
 	wp := WorkProcessor{
 		WorkSub:       workSub,
 		ProgressTopic: progressTopic,
-		Handlers: NewHandlerRegistry(map[uint64]WorkHandler{
+		Handlers: &HandlerRegistry{map[uint64]WorkHandler{
 			0: &TestWorkHandler{map[string]*taskpb.TaskRespMsg{
-				taskReqMsg.TaskRelRsrcName: want,
-			}},
-		}),
-		StatsLog: statslog.New(),
-		JcpClient: jcp.NewClient(jcp.NewServerConnection(fakeJcp)),
+				name: &taskpb.TaskRespMsg{
+					TaskRelRsrcName: name,
+					Status: "SUCCESS",
+					RespSpec: rspec,
+					ReqSpec: rspec,
+			}}},
+		}},
+		JcpClient: jcp.NewClient(conn),
+		StatsTracker: stats.NewTracker(ctx),
 	}
 	wp.processMessage(ctx, psTaskReqMsg)
 
-	// Read and check task response message
-	receiveMessages(ctx, msgs, progressSub)
-	psTaskRespMsg := getMessageOrTimeout(t, msgs)
-
-	var taskRespMsg taskpb.TaskRespMsg
-	if err := proto.Unmarshal(psTaskRespMsg.Data, &taskRespMsg); err != nil {
-		t.Fatalf("error decoding msg %s with error %v.", string(psTaskRespMsg.Data), err)
-	}
-
-	if taskRespMsg.TaskRelRsrcName != want.TaskRelRsrcName || taskRespMsg.Status != want.Status {
-		t.Errorf("wp.processMessage(%v) = %v, want %v", taskReqMsg, taskRespMsg, want)
+	// Message should be in state COMPLETED in the JCP.
+	var jcpTask *jcp.Task
+	jcpTask = jcpServer.GetTask(name)
+	if jcpTask.Status != transferpb.TaskStatus_COMPLETED {
+		t.Errorf("Expected task to be in state COMPLETED but instead it is in state %v",
+			jcpTask.Status.String())
+		t.Errorf("%v", jcpTask)
 	}
 }
 
