@@ -44,10 +44,10 @@ func Pack(taskReqMsg *taskpb.TaskReqMsg, taskSpec *transferpb.TaskSpec) error {
 	encoding := base64.StdEncoding
 	var encoded string
 	encoded = encoding.EncodeToString(data)
-	for i := 0; i*1024 < len(encoded); i++ {
+	for i := 0; i*100 < len(encoded); i++ {
 		taskSpec.TaskProperties = append(taskSpec.TaskProperties, &transferpb.TaskProperty{
 			Name:  strconv.Itoa(i),
-			Value: encoded[i*1024 : min((i+1)*1024, len(encoded))],
+			Value: encoded[i*100 : min((i+1)*100, len(encoded))],
 		})
 	}
 	return nil
@@ -93,12 +93,12 @@ func newProcessListTask(jobRun string, respMsg *taskpb.TaskRespMsg) *transferpb.
 	processListSpec := taskpb.ProcessListSpec{
 		DstListResultBucket: listSpec.DstListResultBucket,
 		DstListResultObject: listSpec.DstListResultObject,
-		SrcDirectory: listSpec.SrcDirectories[0],
+		SrcDirectory:        listSpec.SrcDirectories[0],
 	}
 	reqMsg := taskpb.TaskReqMsg{
-		TaskRelRsrcName: respMsg.TaskRelRsrcName,
+		TaskRelRsrcName:   respMsg.TaskRelRsrcName,
 		JobrunRelRsrcName: jobRun,
-		JobRunVersion: respMsg.JobRunVersion,
+		JobRunVersion:     respMsg.JobRunVersion,
 		Spec: &taskpb.Spec{
 			Spec: &taskpb.Spec_ProcessListSpec{
 				ProcessListSpec: &processListSpec,
@@ -160,10 +160,20 @@ func NewReportTaskProgressRequest(taskSpec *transferpb.TaskSpec, taskRespMsg *ta
 			}
 		case *taskpb.Spec_CopySpec:
 			copySpec := taskRespMsg.RespSpec.GetCopySpec()
+			req.Counters = append(req.Counters,
+				&transferpb.Counter{
+					Name:  "BYTES_COPIED",
+					Value: copySpec.BytesCopied,
+				})
 			if copySpec.FileBytes == copySpec.BytesCopied {
-				glog.Errorf("marking job COMPLETED %v = %v", copySpec.FileBytes,
+				glog.Errorf("marking copy COMPLETED %v = %v", copySpec.FileBytes,
 					copySpec.BytesCopied)
 				req.TaskStatus = transferpb.TaskStatus_COMPLETED
+				req.Counters = append(req.Counters,
+					&transferpb.Counter{
+						Name:  "OBJECTS_COPIED",
+						Value: 1,
+					})
 			} else {
 				req.TaskStatus = transferpb.TaskStatus_IN_PROGRESS
 				req.UpdatedTaskSpec = proto.Clone(taskSpec).(*transferpb.TaskSpec)

@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
+	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 
@@ -57,6 +57,7 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 	useJcp := true
 	err := proto.Unmarshal(msg.Data, &taskSpec)
 	if err == nil {
+		fmt.Printf("Got taskSpec %v", proto.MarshalTextString(&taskSpec))
 		err = Unpack(&taskSpec, &taskReqMsg)
 	}
 	if err != nil {
@@ -68,6 +69,7 @@ func (wp *WorkProcessor) processMessage(ctx context.Context, msg *pubsub.Message
 		}
 		useJcp = false
 	}
+	fmt.Printf("Got taskReqMsg %v", proto.MarshalTextString(&taskReqMsg))
 	var jcpWg sync.WaitGroup
 	quitHeartbeat := make(chan bool)
 	if useJcp {

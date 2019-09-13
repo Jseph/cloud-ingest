@@ -23,8 +23,6 @@ func expectEq(req1, req2 proto.Message, t *testing.T) {
 	}
 }
 
-
-
 func TestPackUnpackDefaultTaskReqMsg(t *testing.T) {
 	var req1 taskpb.TaskReqMsg
 	var req2 taskpb.TaskReqMsg
@@ -63,30 +61,30 @@ func TestNewReportTaskProgressRequestListTask(t *testing.T) {
 	operationName := "transferOp_1"
 	leaseTokenId := "some_lease"
 	taskSpec := transferpb.TaskSpec{
-		Name: name,
-		ProjectId: projectId,
+		Name:                  name,
+		ProjectId:             projectId,
 		TransferOperationName: operationName,
-		LeaseTokenId: leaseTokenId,
+		LeaseTokenId:          leaseTokenId,
 	}
 	spec := &taskpb.Spec{
 		Spec: &taskpb.Spec_ListSpec{
 			ListSpec: &taskpb.ListSpec{
 				DstListResultBucket: "a",
 				DstListResultObject: "a/b",
-				SrcDirectories: []string{"/"},
+				SrcDirectories:      []string{"/"},
 			}}}
 	taskRespMsg := taskpb.TaskRespMsg{
-		Status: "SUCCESS",
-		ReqSpec: spec,
+		Status:   "SUCCESS",
+		ReqSpec:  spec,
 		RespSpec: spec,
 	}
 	expected := &transferpb.ReportTaskProgressRequest{
-		Name: name,
-		ProjectId: projectId,
+		Name:                  name,
+		ProjectId:             projectId,
 		TransferOperationName: operationName,
-		WorkerId: "worker_0",
-		LeaseTokenId: leaseTokenId,
-		TaskStatus: transferpb.TaskStatus_COMPLETED,
+		WorkerId:              "worker_0",
+		LeaseTokenId:          leaseTokenId,
+		TaskStatus:            transferpb.TaskStatus_COMPLETED,
 		GeneratedTaskSpecs: []*transferpb.TaskSpec{
 			newProcessListTask(operationName, &taskRespMsg)},
 	}

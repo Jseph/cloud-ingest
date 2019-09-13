@@ -8,17 +8,13 @@ import (
 	"time"
 )
 
-var (
-	prodServerAddr = "josephcox-storagetransfer.sandbox.googleapis.com:443"
-)
-
-func NewConnection() (*grpc.ClientConn, error) {
+func NewConnection(serverAddr string) (*grpc.ClientConn, error) {
 	ctx := context.Background()
 	oauthCreds, err := oauth.NewApplicationDefault(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return grpc.Dial(prodServerAddr,
+	return grpc.Dial(serverAddr,
 		grpc.WithBlock(),
 		grpc.WithTimeout(10*time.Second),
 		grpc.WithTransportCredentials(credentials.NewClientTLSFromCert(nil, "")),

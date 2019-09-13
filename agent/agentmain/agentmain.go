@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/versions"
 	"github.com/GoogleCloudPlatform/cloud-ingest/gcloud"
+	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/golang/glog"
 	"google.golang.org/api/option"
 )
@@ -70,6 +71,8 @@ var (
 
 	listFileSizeThreshold          int
 	maxMemoryForListingDirectories int
+
+	jcpServerAddr string
 
 	// Fields used to display version information. These defaults are
 	// overridden when the release script builds in values through ldflags.
@@ -113,6 +116,8 @@ func init() {
 	flag.IntVar(&maxMemoryForListingDirectories, "max-memory-for-listing-directories", 20,
 		"Maximum amount of memory agent will use in total (not per task) to store directories before writing them to a list file. Value is in MiB.")
 
+	flag.StringVar(&jcpServerAddr, "jcp-server-address", "zwilt-storagetransfer.sandbox.googleapis.com:443",
+		"Address of the jcp GRPC server to connect to.  Should include port 443.")
 	flag.Parse()
 }
 
@@ -298,7 +303,12 @@ func main() {
 	}
 
 	var listProcessor, copyProcessor agent.WorkProcessor
-
+	jcpConn, err := jcp.NewConnection(jcpServerAddr)
+	if err != nil {
+		glog.Fatalf("Failed to connect to JCP server '%v': %v",
+			jcpServerAddr, err)
+	}
+	jcpClient := jcp.NewClient(jcpConn)
 	if !skipProcessListTasks {
 		wg.Add(1)
 		go func() {
@@ -334,6 +344,7 @@ func main() {
 					2: depthFirstListHandler,
 				}),
 				StatsTracker: st,
+				JcpClient:    jcpClient,
 			}
 
 			listProcessor.Process(ctx)
@@ -349,7 +360,7 @@ func main() {
 			copySub.ReceiveSettings.MaxOutstandingMessages = numberThreads * copyOutstandingMsgsFactor
 			copySub.ReceiveSettings.Synchronous = true
 			copyTopic := pubSubClient.Topic(pubsubPrefix + copyProgressTopic)
-			copyTopicWrapper := gcloud.NewPubSubTopicWrapper(copyTopic)
+			// copyTopicWrapper := gcloud.NewPubSubTopicWrapper(copyTopic)
 
 			// Wait for copy subscription to exist.
 			if err := waitOnSubscription(ctx, copySub); err != nil {
@@ -357,9 +368,9 @@ func main() {
 			}
 
 			// Wait for copy topic to exist.
-			if err := waitOnTopic(ctx, copyTopicWrapper); err != nil {
-				glog.Fatalf("Could not find copy topic %s, error %+v", copyTopicWrapper.ID(), err)
-			}
+			// if err := waitOnTopic(ctx, copyTopicWrapper); err != nil {
+			// 	glog.Fatalf("Could not find copy topic %s, error %+v", copyTopicWrapper.ID(), err)
+			// }
 
 			copyHandler := agent.NewCopyHandler(storageClient, numberThreads, httpc, st)
 			copyProcessor = agent.WorkProcessor{
@@ -371,6 +382,7 @@ func main() {
 					2: copyHandler,
 				}),
 				StatsTracker: st,
+				JcpClient:    jcpClient,
 			}
 
 			copyProcessor.Process(ctx)

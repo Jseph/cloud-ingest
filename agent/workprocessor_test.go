@@ -7,9 +7,9 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/pubsub/pstest"
-	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/rate"
 	"github.com/GoogleCloudPlatform/cloud-ingest/agent/stats"
+	"github.com/GoogleCloudPlatform/cloud-ingest/jcp"
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -237,15 +237,15 @@ func TestWorkProcessorProcessJcpMessage(t *testing.T) {
 	project := "projectid"
 	rspec := &taskpb.Spec{
 		Spec: &taskpb.Spec_CopySpec{
-			CopySpec: &taskpb.CopySpec {
-				FileBytes: 1,
+			CopySpec: &taskpb.CopySpec{
+				FileBytes:   1,
 				BytesCopied: 1,
 			}}}
 	taskReqMsg := taskpb.TaskReqMsg{
 		TaskRelRsrcName:   name,
 		JobrunRelRsrcName: jobRun,
 		JobRunVersion:     "0.0.0",
-		Spec: rspec,
+		Spec:              rspec,
 	}
 	err := Pack(&taskReqMsg, &spec)
 	if err != nil {
@@ -288,12 +288,12 @@ func TestWorkProcessorProcessJcpMessage(t *testing.T) {
 			0: &TestWorkHandler{map[string]*taskpb.TaskRespMsg{
 				name: &taskpb.TaskRespMsg{
 					TaskRelRsrcName: name,
-					Status: "SUCCESS",
-					RespSpec: rspec,
-					ReqSpec: rspec,
-			}}},
+					Status:          "SUCCESS",
+					RespSpec:        rspec,
+					ReqSpec:         rspec,
+				}}},
 		}},
-		JcpClient: jcp.NewClient(conn),
+		JcpClient:    jcp.NewClient(conn),
 		StatsTracker: stats.NewTracker(ctx),
 	}
 	wp.processMessage(ctx, psTaskReqMsg)
